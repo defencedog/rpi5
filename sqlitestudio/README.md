@@ -27,19 +27,25 @@ Memory: 2061MiB / 7952MiB
 Available `libsqlite3-dev` is very old & unsupported
 ### Compile `sqlite3.41.x`
 ```
-mkdir ~/local
-cd ~/local
+mkdir ~/.local
+cd ~/.local
 wget https://sqlite.org/tmp/tcl9.0.0.tar.gz
 tar -xvf tcl9.0.0.tar.gz
 cd tcl9.0.0/unix
-./configure --prefix=$HOME/local
+./configure --prefix=$HOME/.local
 make install
 cd ../..
 wget https://sqlite.org/2025/sqlite-src-3500400.zip
 unzip sqlite-src-3500400.zip
 cd sqlite-src-3500400
-./configure --enable-all --with-tclsh=$HOME/local/bin/tclsh9.0 --prefix=$HOME/local
+./configure --enable-all --with-tclsh=$HOME/local/bin/tclsh9.0 --prefix=$HOME/.local
 make install
+sudo nano /etc/ld.so.conf.d/aarch64-linux-gnu.conf
+#add this line (replace user) ->  /home/ukhan/.local/lib
+sudo ldconfig -v
+nano ~/.bashrc
+#EOF add this line ->
+export PATH=$PATH:$HOME/dotnet:/home/ukhan/.local/bin
 ```
 
 ## Build Instructions
