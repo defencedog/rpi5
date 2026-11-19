@@ -1,0 +1,21 @@
+Package: pinta-3.1.2
+Version: 3.1.2+rpi5backport2
+Section: graphics
+Priority: optional
+Architecture: arm64
+Maintainer: Pinta RPi5 Backport <pinta-rpi5@users.noreply.github.com>
+Installed-Size: @SIZE@
+Depends: libgtk-4-1 (>= 4.8.0), libadwaita-1-0 (>= 1.2.0), libgdk-pixbuf-2.0-0, libcairo2, libpango-1.0-0, libpangocairo-1.0-0, libglib2.0-0, libicu72, libssl3, zlib1g, libstdc++6, libgcc-s1, librsvg2-common
+Recommends: hicolor-icon-theme, desktop-file-utils, xdg-desktop-portal-gtk, fonts-dejavu-core
+Homepage: https://github.com/PintaProject/Pinta
+Description: Pinta 3.1.2 image editor (GTK 4.8 backport for Raspberry Pi 5)
+ Pinta is a free, open-source drawing and image editing application.
+ .
+ This is an unofficial backport of Pinta 3.1.2 to the GTK 4.8 and
+ libadwaita 1.2 libraries shipped with Raspberry Pi OS Bookworm
+ (Debian 12) on arm64. The .NET 8 runtime is bundled, so no separate
+ .NET installation is required.
+ .
+ It installs alongside an existing Pinta 2.1.x installation. Launch
+ this version with the "Pinta 3.1.2" menu entry or the pinta-3.1.2
+ command.

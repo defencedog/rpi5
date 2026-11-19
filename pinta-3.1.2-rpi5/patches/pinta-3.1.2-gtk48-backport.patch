@@ -1,0 +1,435 @@
+diff --git a/Pinta.Core/Actions/EditActions.cs b/Pinta.Core/Actions/EditActions.cs
+index c0dc075..e5ae33c 100644
+--- a/Pinta.Core/Actions/EditActions.cs
++++ b/Pinta.Core/Actions/EditActions.cs
+@@ -479,17 +479,21 @@ public sealed class EditActions
+ 		using Gtk.FileFilter palettesFilter = CreatePalettesFilter ();
+ 		using Gtk.FileFilter catchAllFilter = CreateCatchAllFilter ();
+ 
+-		using Gio.ListStore filters = Gio.ListStore.New (Gtk.FileFilter.GetGType ());
+-		filters.Append (palettesFilter);
+-		filters.Append (catchAllFilter);
+-
+-		using Gtk.FileDialog fileDialog = Gtk.FileDialog.New ();
+-		fileDialog.SetTitle (Translations.GetString ("Open Palette File"));
+-		fileDialog.SetFilters (filters);
++		using Gtk.FileChooserNative fileDialog = Gtk.FileChooserNative.New (
++			Translations.GetString ("Open Palette File"),
++			chrome.MainWindow,
++			Gtk.FileChooserAction.Open,
++			null,
++			null);
++		fileDialog.AddFilter (palettesFilter);
++		fileDialog.AddFilter (catchAllFilter);
+ 		if (last_palette_dir != null)
+-			fileDialog.SetInitialFolder (last_palette_dir);
++			fileDialog.SetCurrentFolder (last_palette_dir);
++
++		if (await fileDialog.RunAsync () != Gtk.ResponseType.Accept)
++			return;
+ 
+-		var choice = await fileDialog.OpenFileAsync (chrome.MainWindow);
++		Gio.File? choice = fileDialog.GetFile ();
+ 
+ 		if (choice is null)
+ 			return;
+diff --git a/Pinta.Core/Actions/LayerActions.cs b/Pinta.Core/Actions/LayerActions.cs
+index ea50548..60e8791 100644
+--- a/Pinta.Core/Actions/LayerActions.cs
++++ b/Pinta.Core/Actions/LayerActions.cs
+@@ -252,16 +252,20 @@ public sealed class LayerActions
+ 		// Add image files filter
+ 		using Gtk.FileFilter imagesFilter = CreateImagesFileFilter ();
+ 
+-		using Gio.ListStore fileFilters = Gio.ListStore.New (Gtk.FileFilter.GetGType ());
+-		fileFilters.Append (imagesFilter);
+-
+-		using Gtk.FileDialog fileDialog = Gtk.FileDialog.New ();
+-		fileDialog.SetTitle (Translations.GetString ("Open Image File"));
+-		fileDialog.SetFilters (fileFilters);
++		using Gtk.FileChooserNative fileDialog = Gtk.FileChooserNative.New (
++			Translations.GetString ("Open Image File"),
++			chrome.MainWindow,
++			Gtk.FileChooserAction.Open,
++			null,
++			null);
++		fileDialog.AddFilter (imagesFilter);
+ 		if (recent_files.GetDialogDirectory () is Gio.File dir && dir.QueryExists (null))
+-			fileDialog.SetInitialFolder (dir);
++			fileDialog.SetCurrentFolder (dir);
++
++		if (await fileDialog.RunAsync () != Gtk.ResponseType.Accept)
++			return;
+ 
+-		Gio.File? choice = await fileDialog.OpenFileAsync (chrome.MainWindow);
++		Gio.File? choice = fileDialog.GetFile ();
+ 
+ 		if (choice is null) return;
+ 
+diff --git a/Pinta.Core/Extensions/GdkExtensions.cs b/Pinta.Core/Extensions/GdkExtensions.cs
+index 0745547..1a49339 100644
+--- a/Pinta.Core/Extensions/GdkExtensions.cs
++++ b/Pinta.Core/Extensions/GdkExtensions.cs
+@@ -241,19 +241,19 @@ public static class GdkExtensions
+ 	}
+ 
+ 	[DllImport (GdkLibraryName, EntryPoint = "gdk_file_list_get_files")]
+-	private static extern GLib.Internal.SListOwnedHandle FileListGetFiles (Gdk.Internal.FileListHandle fileList);
++	private static extern IntPtr FileListGetFiles (Gdk.Internal.FileListHandle fileList);
+ 
+ 	// Wrapper around Gdk.FileList.GetFiles() to return a Gio.File array rather than GLib.SList.
+ 	// TODO-GTK4 (bindings) - Gdk.FileList.GetFiles() is not generated
+ 	public static Gio.File[] GetFilesHelper (this Gdk.FileList file_list)
+ 	{
+-		GLib.SList slist = new (FileListGetFiles (file_list.Handle));
++		var list = new GLib.Internal.SListUnownedHandle (FileListGetFiles (file_list.Handle));
+ 
+-		uint n = GLib.SList.Length (slist);
++		uint n = GLib.Internal.SList.Length (list);
+ 
+ 		var result = new Gio.File[n];
+ 		for (uint i = 0; i < n; ++i) {
+-			IntPtr file_ptr = GLib.SList.NthData (slist, i);
++			IntPtr file_ptr = GLib.Internal.SList.NthData (list, i);
+ 			result[i] = (Gio.FileHelper) GObject.Internal.InstanceWrapper.WrapHandle<Gio.FileHelper> (file_ptr, ownedRef: false);
+ 		}
+ 
+diff --git a/Pinta.Core/Extensions/GdkPixbufExtensions.cs b/Pinta.Core/Extensions/GdkPixbufExtensions.cs
+index 466a674..2d725f8 100644
+--- a/Pinta.Core/Extensions/GdkPixbufExtensions.cs
++++ b/Pinta.Core/Extensions/GdkPixbufExtensions.cs
+@@ -60,19 +60,59 @@ public static partial class GdkPixbufExtensions
+ 	// TODO-GTK4 (bindings) - record methods are not generated (https://github.com/gircore/gir.core/issues/743)
+ 	public static PixbufFormat[] GetFormats ()
+ 	{
+-		var slist = new GLib.SList (GetFormatsNative ());
+-		uint n = GLib.SList.Length (slist);
++		var list = new GLib.Internal.SListUnownedHandle (GetFormatsNative ());
++		uint n = GLib.Internal.SList.Length (list);
+ 		var result = new PixbufFormat[n];
+ 		for (uint i = 0; i < n; ++i) {
+-			var format = new GdkPixbuf.Internal.PixbufFormatUnownedHandle (GLib.SList.NthData (slist, i));
++			var format = new GdkPixbuf.Internal.PixbufFormatUnownedHandle (GLib.Internal.SList.NthData (list, i));
+ 			result[i] = new PixbufFormat (GdkPixbuf.Internal.PixbufFormat.Copy (format));
+ 		}
+ 
+ 		return result;
+ 	}
+ 
++	// GTK 4.8 / Debian compatibility: gdk_pixbuf_get_from_surface() is unavailable because
++	// Debian builds gdk-pixbuf without Cairo support. Convert the premultiplied Cairo
++	// ARGB32 surface (BGRA on little-endian) into straight RGBA for GdkPixbuf instead.
++	public static GdkPixbuf.Pixbuf GetPixbufFromSurface (Cairo.ImageSurface surface)
++	{
++		int width = surface.Width;
++		int height = surface.Height;
++		int src_stride = surface.Stride;
++		int dst_stride = width * 4;
++		var src = surface.GetData ();
++		var dst = new byte[dst_stride * height];
++
++		for (int y = 0; y < height; ++y) {
++			var src_row = src.Slice (y * src_stride, width * 4);
++			int dst_row = y * dst_stride;
++
++			for (int x = 0; x < width; ++x) {
++				int i = x * 4;
++				byte b = src_row[i];
++				byte g = src_row[i + 1];
++				byte r = src_row[i + 2];
++				byte a = src_row[i + 3];
++
++				if (a != 0 && a != 255) {
++					r = (byte) Math.Min (255, r * 255 / a);
++					g = (byte) Math.Min (255, g * 255 / a);
++					b = (byte) Math.Min (255, b * 255 / a);
++				}
++
++				dst[dst_row + i] = r;
++				dst[dst_row + i + 1] = g;
++				dst[dst_row + i + 2] = b;
++				dst[dst_row + i + 3] = a;
++			}
++		}
++
++		using var bytes = GLib.Bytes.New (dst);
++		return GdkPixbuf.Pixbuf.NewFromBytes (bytes, GdkPixbuf.Colorspace.Rgb, true, 8, width, height, dst_stride);
++	}
++
+ 	[DllImport (PixbufLibraryName, EntryPoint = "gdk_pixbuf_get_formats")]
+-	private static extern GLib.Internal.SListOwnedHandle GetFormatsNative ();
++	private static extern IntPtr GetFormatsNative ();
+ 
+ 	[DllImport (PixbufLibraryName, EntryPoint = "gdk_pixbuf_save_to_bufferv")]
+ 	private static extern bool SaveToBufferv (IntPtr pixbuf, out IntPtr buffer, out uint buffer_size, [MarshalAs (UnmanagedType.LPUTF8Str)] string type, IntPtr option_keys, IntPtr option_values, out GLib.Internal.ErrorOwnedHandle error);
+diff --git a/Pinta.Core/Extensions/OtherExtensions.cs b/Pinta.Core/Extensions/OtherExtensions.cs
+index 67534be..2be2c71 100644
+--- a/Pinta.Core/Extensions/OtherExtensions.cs
++++ b/Pinta.Core/Extensions/OtherExtensions.cs
+@@ -148,8 +148,10 @@ public static class OtherExtensions
+ 			Process process = Process.Start ("open", uri);
+ 			process.WaitForExit ();
+ 		} else {
+-			Gtk.UriLauncher launcher = Gtk.UriLauncher.New (uri);
+-			await launcher.LaunchAsync (PintaCore.Chrome.MainWindow);
++			// GTK 4.8 compatibility: Gtk.UriLauncher requires GTK 4.10+.
++			// gtk_show_uri() exists in GTK 4.8 (deprecated in 4.10).
++			Gtk.Functions.ShowUri (PintaCore.Chrome.MainWindow, uri, 0);
++			await Task.CompletedTask;
+ 		}
+ 	}
+ 
+diff --git a/Pinta.Gui.Widgets/Widgets/Canvas/PintaCanvas.cs b/Pinta.Gui.Widgets/Widgets/Canvas/PintaCanvas.cs
+index c05ae0c..ce3a8f1 100644
+--- a/Pinta.Gui.Widgets/Widgets/Canvas/PintaCanvas.cs
++++ b/Pinta.Gui.Widgets/Widgets/Canvas/PintaCanvas.cs
+@@ -168,19 +168,12 @@ public sealed class PintaCanvas : Gtk.Picture
+ 		Gdk.Texture? updateTexture = null,
+ 		Cairo.Region? updateRegion = null)
+ 	{
+-		// TODO - can we avoid copying the full image into GLib.Bytes on each update?
+-		GLib.Bytes bytes = GLib.Bytes.New (surface.GetData ());
+-		Gdk.MemoryTextureBuilder builder = new () {
+-			Bytes = bytes,
+-			Stride = (ulong) surface.Stride,
+-			Width = surface.Width,
+-			Height = surface.Height,
+-			Format = Gdk.MemoryFormat.B8g8r8a8Premultiplied,
+-			UpdateTexture = updateTexture,
+-			UpdateRegion = updateRegion ?? CairoExtensions.CreateRegion (RectangleI.Zero)
+-		};
+-
+-		return builder.Build ();
++		// GTK 4.8 compatibility: Gdk.MemoryTextureBuilder requires GTK 4.10+.
++		// Use gdk_pixbuf_get_from_surface + gdk_texture_new_for_pixbuf instead.
++		_ = updateTexture;
++		_ = updateRegion;
++		using GdkPixbuf.Pixbuf pixbuf = GdkPixbufExtensions.GetPixbufFromSurface (surface);
++		return Gdk.Texture.NewForPixbuf (pixbuf);
+ 	}
+ 
+ 	private static Gdk.Texture CreateTransparentPatternTexture () =>
+@@ -233,11 +226,9 @@ public sealed class PintaCanvas : Gtk.Picture
+ 		if (canvas_texture is null)
+ 			throw new InvalidOperationException ("Canvas was never invalidated!");
+ 
+-		// Scale to fit the view size (when zooming in or out).
+-		Gsk.ScalingFilter scalingFilter = (document.Workspace.Scale >= 1.0) ?
+-			Gsk.ScalingFilter.Nearest :
+-			Gsk.ScalingFilter.Linear;
+-		snapshot.AppendScaledTexture (canvas_texture, scalingFilter, canvasViewBounds);
++		// GTK 4.8 compatibility: gtk_snapshot_append_scaled_texture() requires GTK 4.10+.
++		// gtk_snapshot_append_texture() also scales the texture to fit the given bounds.
++		snapshot.AppendTexture (canvas_texture, canvasViewBounds);
+ 	}
+ 
+ 	private void DrawSelection (Gtk.Snapshot snapshot, Graphene.Rect canvasViewBounds)
+diff --git a/Pinta.Resources/ResourceManager.cs b/Pinta.Resources/ResourceManager.cs
+index 99c0f5c..17b81b7 100644
+--- a/Pinta.Resources/ResourceManager.cs
++++ b/Pinta.Resources/ResourceManager.cs
+@@ -61,7 +61,8 @@ public static class ResourceLoader
+ 	{
+ 		if (TryGetBytesFromAssembly (Assembly.GetExecutingAssembly (), "style.css", out Bytes? bytes)) {
+ 			var cssProvider = CssProvider.New ();
+-			cssProvider.LoadFromBytes (bytes);
++			var css = System.Text.Encoding.UTF8.GetString (bytes.GetRegionSpan<byte> (UIntPtr.Zero, bytes.GetSize ()));
++			cssProvider.LoadFromData (css, new IntPtr (-1));
+ 			var display = Display.GetDefault ();
+ 			if (display != null) {
+ 				StyleContext.AddProviderForDisplay (display, cssProvider, Gtk.Constants.STYLE_PROVIDER_PRIORITY_APPLICATION);
+diff --git a/Pinta.Resources/icons/hicolor/scalable/actions/effects-default-symbolic.svg b/Pinta.Resources/icons/hicolor/scalable/actions/effects-default-symbolic.svg
+index 2e4ffda..cf8309b 100644
+--- a/Pinta.Resources/icons/hicolor/scalable/actions/effects-default-symbolic.svg
++++ b/Pinta.Resources/icons/hicolor/scalable/actions/effects-default-symbolic.svg
+@@ -7,7 +7,7 @@
+         viewBox='0 0 24 24'>
+   <path
+           id='path1'
+-          fill='url(#gpa:foreground) rgb(0,0,0)'
++          fill='currentColor'
+           fill-opacity='1'
+           fill-rule='nonzero'
+           stroke-width='0.0250567'
+diff --git a/Pinta.Tools/Tools/TextTool.cs b/Pinta.Tools/Tools/TextTool.cs
+index 24bde88..d0c04d0 100644
+--- a/Pinta.Tools/Tools/TextTool.cs
++++ b/Pinta.Tools/Tools/TextTool.cs
+@@ -123,7 +123,7 @@ public sealed class TextTool : BaseTool
+ 	#region ToolBar
+ 	// NRT - Created by OnBuildToolBar
+ 	private Gtk.Label font_label = null!;
+-	private Gtk.FontDialogButton font_button = null!;
++	private Gtk.FontButton font_button = null!;
+ 	private Gtk.ToggleButton bold_btn = null!;
+ 	private Gtk.ToggleButton italic_btn = null!;
+ 	private Gtk.ToggleButton underscore_btn = null!;
+@@ -149,22 +149,15 @@ public sealed class TextTool : BaseTool
+ 		tb.Append (font_label);
+ 
+ 		if (font_button == null) {
+-			Gtk.FontDialog fontDialog = new () {
+-				Modal = true,
+-			};
+-
+-			font_button = new () {
+-				UseSize = false,
+-				UseFont = true,
+-				CanFocus = false,
+-				FontDesc = Pango.FontDescription.FromString (
+-					Settings.GetSetting (SettingNames.TEXT_FONT,
+-					Gtk.Settings.GetDefault ()!.GtkFontName!)),
+-			};
+-			font_button.SetDialog (fontDialog);
+-			Gtk.FontDialogButton.FontDescPropertyDefinition.Notify (font_button, (_, _) => {
+-				HandleFontChanged ();
+-			});
++			// GTK 4.8 compatibility: Gtk.FontDialogButton requires GTK 4.10+.
++			font_button = Gtk.FontButton.New ();
++			font_button.UseSize = false;
++			font_button.UseFont = true;
++			font_button.CanFocus = false;
++			font_button.FontDesc = Pango.FontDescription.FromString (
++				Settings.GetSetting (SettingNames.TEXT_FONT,
++				Gtk.Settings.GetDefault ()!.GtkFontName!));
++			font_button.OnFontSet += (_, _) => HandleFontChanged ();
+ 		}
+ 
+ 		tb.Append (font_button);
+diff --git a/Pinta/Actions/File/OpenDocumentAction.cs b/Pinta/Actions/File/OpenDocumentAction.cs
+index 7d2af55..729f76c 100644
+--- a/Pinta/Actions/File/OpenDocumentAction.cs
++++ b/Pinta/Actions/File/OpenDocumentAction.cs
+@@ -65,24 +65,31 @@ internal sealed class OpenDocumentAction : IActionHandler
+ 		using Gtk.FileFilter imagesFilter = CreateImagesFilter ();
+ 		using Gtk.FileFilter catchAllFilter = CreateCatchAllFilter ();
+ 
+-		using Gio.ListStore filters = Gio.ListStore.New (Gtk.FileFilter.GetGType ());
+-		filters.Append (imagesFilter);
+-		filters.Append (catchAllFilter);
+-
+-		using Gtk.FileDialog fileDialog = Gtk.FileDialog.New ();
+-		fileDialog.SetTitle (Translations.GetString ("Open Image File"));
+-		fileDialog.SetFilters (filters);
+-		fileDialog.Modal = true;
++		using Gtk.FileChooserNative fileDialog = Gtk.FileChooserNative.New (
++			Translations.GetString ("Open Image File"),
++			chrome.MainWindow,
++			Gtk.FileChooserAction.Open,
++			null,
++			null);
++		fileDialog.SelectMultiple = true;
++		fileDialog.AddFilter (imagesFilter);
++		fileDialog.AddFilter (catchAllFilter);
+ 
+ 		if (recent_files.GetDialogDirectory () is Gio.File dir && dir.QueryExists (null))
+-			fileDialog.SetInitialFolder (dir);
+-
+-		var selection = await fileDialog.OpenFilesAsync (chrome.MainWindow);
++			fileDialog.SetCurrentFolder (dir);
+ 
+-		if (selection is null)
++		if (await fileDialog.RunAsync () != Gtk.ResponseType.Accept)
+ 			return;
+ 
+-		foreach (var file in selection) {
++		Gio.ListModel selection = fileDialog.GetFiles ();
++		uint count = selection.GetNItems ();
++		var files = new System.Collections.Generic.List<Gio.File> ((int) count);
++		for (uint i = 0; i < count; i++) {
++			nint g_ref = selection.GetItem (i);
++			files.Add ((Gio.FileHelper) GObject.Internal.InstanceWrapper.WrapHandle<Gio.FileHelper> (g_ref, ownedRef: true));
++		}
++
++		foreach (var file in files) {
+ 
+ 			if (!workspace.OpenFile (file))
+ 				continue;
+diff --git a/Pinta/Main.cs b/Pinta/Main.cs
+index 50c4ba4..8bcfb13 100644
+--- a/Pinta/Main.cs
++++ b/Pinta/Main.cs
+@@ -91,6 +91,10 @@ internal sealed class MainClass
+ 		Gsk.Module.Initialize ();
+ 		Pango.Module.Initialize ();
+ 		PangoCairo.Module.Initialize ();
++
++		// Use a stable application name for the window class.
++		GLib.Functions.SetPrgname ("pinta");
++
+ 		var app = Adw.Application.New (PintaCore.ApplicationId, Gio.ApplicationFlags.NonUnique);
+ 
+ 		// For macOS, use bindtextdomain() to override the location for libadwaita's translations
+@@ -102,6 +106,8 @@ internal sealed class MainClass
+ 
+ 		// Add our icons to the search path.
+ 		GtkExtensions.GetDefaultIconTheme ().AddSearchPath (Pinta.Core.SystemManager.GetDataRootDirectory () + "/icons");
++		// Self-contained installs keep their icon theme inside the application directory.
++		GtkExtensions.GetDefaultIconTheme ().AddSearchPath (Path.Combine (AppContext.BaseDirectory, "icons"));
+ 
+ 		var main_window = new MainWindow (app);
+ 
+@@ -129,6 +135,10 @@ internal sealed class MainClass
+ 			}
+ 		};
+ 
++		// Use the installed app icon for window/taskbar icons. This must happen after
++		// Adw.Application.New() so that GirCore has registered the GTK native library resolver.
++		Gtk.Window.SetDefaultIconName (PintaCore.ApplicationId);
++
+ 		// Run with a SynchronizationContext to integrate async methods with GLib.MainLoop.
+ 		app.RunWithSynchronizationContext (null);
+ 	}
+diff --git a/Pinta/MainWindow.cs b/Pinta/MainWindow.cs
+index 6d4bc90..33813fc 100644
+--- a/Pinta/MainWindow.cs
++++ b/Pinta/MainWindow.cs
+@@ -43,6 +43,7 @@ internal sealed class MainWindow
+ 	Gio.Menu menu_bar = null!;
+ 	Gio.Menu image_menu = null!;
+ 	Gio.Menu view_menu = null!;
++	readonly System.Collections.Generic.List<Gio.Menu> menu_refs = new ();
+ 
+ 	CanvasPad canvas_pad = null!;
+ 
+@@ -433,6 +434,7 @@ internal sealed class MainWindow
+ 		image_menu = imageMenu;
+ 		menu_bar = menuBar;
+ 		view_menu = viewMenu;
++		menu_refs.AddRange (new[] { fileMenu, editMenu, imageMenu, layersMenu, adjustmentsMenu, effectsMenu, addinsMenu, windowMenu, helpMenu, padSection, viewMenu, menuBar });
+ 	}
+ 
+ 	private void CreateMainToolBar ()
+diff --git a/Pinta/WindowShell.cs b/Pinta/WindowShell.cs
+index 5c14b77..c32304f 100644
+--- a/Pinta/WindowShell.cs
++++ b/Pinta/WindowShell.cs
+@@ -45,7 +45,7 @@ public sealed class WindowShell
+ 		bool useMenuBar,
+ 		bool maximize)
+ 	{
+-		var app_layout = Adw.ToolbarView.New ();
++		var app_layout = Gtk.Box.New (Gtk.Orientation.Vertical, 0);
+ 
+ 		if (!useMenuBar) {
+ 			var adwWindow = Adw.ApplicationWindow.New (app);
+@@ -53,7 +53,7 @@ public sealed class WindowShell
+ 			app_window = adwWindow;
+ 
+ 			header_bar = Adw.HeaderBar.New ();
+-			app_layout.AddTopBar (header_bar);
++			app_layout.Append (header_bar);
+ 		} else {
+ 			// If the header bar isn't being used, we use a regular Gtk.ApplicationWindow
+ 			// to have a traditional titlebar with the standard close / minimize buttons,
+@@ -73,7 +73,9 @@ public sealed class WindowShell
+ 			app_window.Maximize ();
+ 
+ 		shell_layout = Gtk.Box.New (Gtk.Orientation.Vertical, 0);
+-		app_layout.SetContent (shell_layout);
++		shell_layout.Vexpand = true;
++		shell_layout.Hexpand = true;
++		app_layout.Append (shell_layout);
+ 
+ 		app_window.Present ();
+ 	}

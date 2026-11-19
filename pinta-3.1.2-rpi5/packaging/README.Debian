@@ -1,0 +1,91 @@
+Pinta 3.1.2 for Raspberry Pi 5
+==============================
+
+This is an unofficial arm64 build of Pinta 3.1.2 for Raspberry Pi OS
+Bookworm (Debian 12).  Upstream Pinta 3.1.2 expects GTK 4.10+ and
+libadwaita 1.6+, so the source was backported to the GTK 4.8.3 /
+libadwaita 1.2.2 stack that ships with Bookworm.
+
+The .NET 8 runtime is bundled under /usr/lib/pinta-3.1.2.  No system-wide
+dotnet installation is required, and this package does not depend on the
+Microsoft or Debian dotnet packages.  librsvg2-common is a package
+dependency because Pinta uses SVG icons.
+
+Installation
+------------
+
+    sudo apt install ./pinta-3.1.2_3.1.2+rpi5backport2_arm64.deb
+
+Run:
+
+    pinta-3.1.2 [FILE...]
+
+or use the "Pinta 3.1.2" entry in the application menu.
+
+Coexistence with Pinta 2.1.x
+----------------------------
+
+The package installs /usr/bin/pinta-3.1.2 and /usr/lib/pinta-3.1.2.  It
+does not touch /usr/local/bin/pinta or /usr/local/lib/pinta, so an
+existing Pinta 2.1.x installation remains available as "pinta".
+
+If the old 2.1.x desktop entry is also visible in the application menu,
+it can be hidden by adding NoDisplay=true to its .desktop file; the
+"pinta" command remains available.
+
+Backport changes
+----------------
+
+The upstream 3.1.2 source (commit b3df1e5) was patched for GTK 4.8 /
+libadwaita 1.2:
+
+  * Adw.ToolbarView replaced with a vertical Gtk.Box
+  * Gtk.FileDialog replaced with Gtk.FileChooserNative
+  * Gtk.FontDialogButton replaced with Gtk.FontButton
+  * Gtk.UriLauncher replaced with gtk_show_uri()
+  * Gtk.Snapshot.AppendScaledTexture replaced with AppendTexture
+  * Gdk.MemoryTextureBuilder replaced with GdkPixbuf +
+    Gdk.Texture.NewForPixbuf
+  * gtk_css_provider_load_from_bytes replaced with
+    gtk_css_provider_load_from_data
+  * fixed a GSList double-free in GdkPixbuf format enumeration
+  * set the application icon and program name so the taskbar icon is
+    correct
+  * added the application-local icons directory to GTK's icon search
+    path so the Adjustments and Effects header icons resolve in the
+    self-contained layout
+  * switched effects-default-symbolic to currentColor so GTK 4.8 can
+    recolor it
+
+The full patch is installed as
+/usr/share/doc/pinta-3.1.2/pinta-3.1.2-gtk48-backport.patch.gz.
+
+Known limitations
+-----------------
+
+  * The canvas texture is converted from Cairo ARGB32 to a GdkPixbuf in
+    managed code, because Debian builds gdk-pixbuf without Cairo support
+    (gdk_pixbuf_get_from_surface is unavailable).  Very large canvases
+    may redraw more slowly than upstream Pinta on newer GTK.
+  * File dialogs use Gtk.FileChooserNative.  Install
+    xdg-desktop-portal-gtk for the best desktop integration.
+  * The font chooser uses Gtk.FontButton (GTK 4.8).
+  * Links are opened with gtk_show_uri().
+  * GTK 4.10+ features (for example, scaled-texture filter hints) are
+    not available.
+
+Building from source
+--------------------
+
+  git clone https://github.com/PintaProject/Pinta.git
+  cd Pinta
+  git checkout 3.1.2
+  patch -p1 < /path/to/pinta-3.1.2-rpi5/patches/pinta-3.1.2-gtk48-backport.patch
+  dotnet publish Pinta/Pinta.csproj -c Release -r linux-arm64 \
+      --self-contained true -p:PublishSingleFile=false -o publish
+  /path/to/pinta-3.1.2-rpi5/build-deb.sh publish
+
+The resulting package is arm64-only and targets Raspberry Pi OS
+Bookworm / Debian 12 with GTK 4.8 and libadwaita 1.2.
+
+ -- Pinta RPi5 Backport <pinta-rpi5@users.noreply.github.com>

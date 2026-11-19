@@ -1,0 +1,24 @@
+pinta-3.1.2 (3.1.2+rpi5backport2) bookworm; urgency=medium
+
+  * Fix the missing Adjustments and Effects header icons in the
+    self-contained layout by adding the application-local icon theme
+    directory to GTK's search path.
+  * Use currentColor for effects-default-symbolic so GTK 4.8 can recolor
+    it correctly.
+  * Depend on librsvg2-common so SVG icons render on all installations.
+
+ -- Pinta RPi5 Backport <pinta-rpi5@users.noreply.github.com>  Thu, 19 Nov 2026 00:00:00 +0000
+
+pinta-3.1.2 (3.1.2+rpi5backport1) bookworm; urgency=medium
+
+  * Initial arm64 backport of Pinta 3.1.2 to GTK 4.8 / libadwaita 1.2
+    for Raspberry Pi OS Bookworm.
+  * Bundle the .NET 8 runtime as a self-contained publish.
+  * Replace GTK 4.10+ APIs: Adw.ToolbarView, Gtk.FileDialog,
+    Gtk.FontDialogButton, Gtk.UriLauncher,
+    Gtk.Snapshot.AppendScaledTexture, Gdk.MemoryTextureBuilder and
+    gtk_css_provider_load_from_bytes.
+  * Fix a GSList double-free in GdkPixbuf format enumeration.
+  * Set the application icon and program name for correct taskbar icons.
+
+ -- Pinta RPi5 Backport <pinta-rpi5@users.noreply.github.com>  Thu, 19 Nov 2026 00:00:00 +0000
