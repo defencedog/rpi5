@@ -1,0 +1,448 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# Raspberry Pi 5 Hardware Monitor - Mobile Termux Edition
+# Compact, ultra-clean telemetry dashboard (fits <38 cols portrait mobile)
+# Compatible with Raspberry Pi 5 (BCM2712)
+# Features: CPU, GPU (VideoCore VII), VPU (HEVC Dec), Fan RPM, NVMe, RAM, Swap
+# ==============================================================================
+
+REFRESH_INTERVAL=1
+RUN_ONCE=false
+
+if [ "$1" = "--once" ] || [ "$1" = "-1" ]; then
+    RUN_ONCE=true
+elif [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+    echo "Usage: rpi5-mon [INTERVAL | --once | -1]"
+    echo "  INTERVAL   Refresh interval in seconds (default: 1)"
+    echo "  --once, -1 Print one snapshot and exit"
+    exit 0
+elif [ -n "$1" ] && [ "$1" -eq "$1" ] 2>/dev/null; then
+    REFRESH_INTERVAL="$1"
+fi
+
+# ANSI Styling
+BOLD="\033[1m"
+DIM="\033[2m"
+RESET="\033[0m"
+CYAN="\033[36m"
+GREEN="\033[32m"
+YELLOW="\033[33m"
+RED="\033[31m"
+BLUE="\033[34m"
+MAGENTA="\033[35m"
+WHITE="\033[37m"
+GRAY="\033[90m"
+BR_CYAN="\033[96m"
+
+# Render colored progress bar (10 blocks = 12 chars [█████░░░░░])
+draw_bar() {
+    local val=$1
+    local width=10
+    local filled=$(( (val * width) / 100 ))
+    [ "$filled" -gt "$width" ] && filled=$width
+    [ "$filled" -lt 0 ] && filled=0
+    local empty=$(( width - filled ))
+
+    local color="$GREEN"
+    if [ "$val" -ge 80 ]; then
+        color="$RED"
+    elif [ "$val" -ge 50 ]; then
+        color="$YELLOW"
+    fi
+
+    local bar=""
+    for ((i=0; i<filled; i++)); do bar="${bar}█"; done
+    for ((i=0; i<empty; i++)); do bar="${bar}░"; done
+    printf "${color}[%s]${RESET}" "$bar"
+}
+
+# Format milli-Celsius to compact Celsius string with color (e.g. 48.3°C)
+format_temp() {
+    local raw=$1
+    if [ -z "$raw" ] || [ "$raw" -le 0 ]; then
+        printf "${GRAY}--.-°C${RESET}"
+        return
+    fi
+    local whole=$((raw / 1000))
+    local frac=$(( (raw % 1000) / 100 ))
+
+    local color="$GREEN"
+    if [ "$whole" -ge 75 ]; then
+        color="$RED"
+    elif [ "$whole" -ge 60 ]; then
+        color="$YELLOW"
+    fi
+    printf "${color}%2d.%d°C${RESET}" "$whole" "$frac"
+}
+
+# Compact Uptime (e.g. "1d 4h" or "3h 25m")
+get_uptime() {
+    local up_sec=0
+    if [ -f /proc/uptime ]; then
+        read -r up_sec _ < /proc/uptime
+        up_sec=${up_sec%%.*}
+        local d=$((up_sec / 86400))
+        local h=$(( (up_sec % 86400) / 3600 ))
+        local m=$(( (up_sec % 3600) / 60 ))
+        if [ "$d" -gt 0 ]; then
+            printf "%dd %dh" "$d" "$h"
+        elif [ "$h" -gt 0 ]; then
+            printf "%dh %dm" "$h" "$m"
+        else
+            printf "%dm" "$m"
+        fi
+    else
+        printf "N/A"
+    fi
+}
+
+# Dynamically locate hwmon device paths
+nvme_temp_path=""
+rp1_temp_path=""
+fan_pwm_path=""
+fan_rpm_path=""
+cpu_temp_path="/sys/class/thermal/thermal_zone0/temp"
+
+for h in /sys/class/hwmon/hwmon*; do
+    [ -d "$h" ] || continue
+    h_name=$(cat "$h/name" 2>/dev/null)
+    case "$h_name" in
+        nvme)
+            [ -f "$h/temp1_input" ] && nvme_temp_path="$h/temp1_input"
+            ;;
+        rp1_adc)
+            [ -f "$h/temp1_input" ] && rp1_temp_path="$h/temp1_input"
+            ;;
+        pwmfan)
+            [ -f "$h/pwm1" ] && fan_pwm_path="$h/pwm1"
+            [ -f "$h/fan1_input" ] && fan_rpm_path="$h/fan1_input"
+            ;;
+        cpu_thermal)
+            [ -f "$h/temp1_input" ] && cpu_temp_path="$h/temp1_input"
+            ;;
+    esac
+done
+
+# Fallback for fan sysfs if not mapped via pwmfan hwmon
+if [ -z "$fan_pwm_path" ]; then
+    for f in /sys/devices/platform/cooling_fan/hwmon/hwmon*/pwm1; do
+        [ -f "$f" ] && fan_pwm_path="$f" && break
+    done
+fi
+if [ -z "$fan_rpm_path" ]; then
+    for f in /sys/devices/platform/cooling_fan/hwmon/hwmon*/fan1_input; do
+        [ -f "$f" ] && fan_rpm_path="$f" && break
+    done
+fi
+
+# Detect storage type label
+disk_label="DSK"
+if [ -n "$nvme_temp_path" ] || [ -b /dev/nvme0n1 ]; then
+    disk_label="NVM"
+fi
+
+# Detect VPU (HEVC hardware decoder / codec) presence
+vpu_online=false
+if [ -e /dev/video19 ] || [ -d /sys/devices/platform/axi/1000800000.codec ] || lsmod | grep -q "rpi_hevc_dec"; then
+    vpu_online=true
+fi
+
+# Initial CPU stats
+read -r _ u n s id io ir sir st _ < /proc/stat
+prev_active=$((u + n + s + ir + sir + st))
+prev_total=$((prev_active + id + io))
+
+# Initial GPU runtime stats
+prev_gpu_rt=0
+prev_gpu_ts=0
+if [ -f /sys/devices/platform/axi/1002000000.v3d/gpu_stats ]; then
+    while read -r q ts jobs rt; do
+        [ "$q" = "queue" ] && continue
+        [ "$prev_gpu_ts" -eq 0 ] && prev_gpu_ts="$ts"
+        prev_gpu_rt=$((prev_gpu_rt + rt))
+    done < /sys/devices/platform/axi/1002000000.v3d/gpu_stats
+fi
+
+# Initial VPU IRQ stats
+curr_vpu_irqs=$(awk '/codec|rpi-hevc|hevc/{for(i=2;i<=NF;i++){if($i~/^[0-9]+$/){s+=$i}else break};print s+0}' /proc/interrupts 2>/dev/null)
+[ -z "$curr_vpu_irqs" ] && curr_vpu_irqs=0
+prev_vpu_irqs=$curr_vpu_irqs
+
+# If running once, short sleep so CPU/VPU delta is meaningful
+if [ "$RUN_ONCE" = true ]; then
+    sleep 0.2
+else
+    # Hide cursor, clear screen
+    trap 'printf "\033[?25h\n"; exit 0' INT TERM EXIT
+    printf "\033[?25l\033[2J\033[H"
+fi
+
+while true; do
+    # 1. CPU Usage Calculation
+    read -r _ u n s id io ir sir st _ < /proc/stat
+    curr_active=$((u + n + s + ir + sir + st))
+    curr_total=$((curr_active + id + io))
+
+    diff_active=$((curr_active - prev_active))
+    diff_total=$((curr_total - prev_total))
+
+    if [ "$diff_total" -gt 0 ]; then
+        cpu_usage=$(( (diff_active * 100) / diff_total ))
+        [ "$cpu_usage" -gt 100 ] && cpu_usage=100
+    else
+        cpu_usage=0
+    fi
+    prev_active=$curr_active
+    prev_total=$curr_total
+
+    # Load average (1 min)
+    read -r l1 _ < /proc/loadavg
+
+    # 2. CPU Frequency & Temperature
+    raw_cpu_freq=0
+    if [ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq ]; then
+        read -r raw_cpu_freq < /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq
+    fi
+    if [ "$raw_cpu_freq" -le 0 ]; then
+        if raw_arm=$(vcgencmd measure_clock arm 2>/dev/null); then
+            raw_cpu_freq=$(( ${raw_arm#*=} / 1000 ))
+        fi
+    fi
+    c_ghz=$((raw_cpu_freq / 1000000))
+    c_frac=$(( (raw_cpu_freq % 1000000) / 10000 ))
+    freq_cpu_str=$(printf "%d.%02dGHz" "$c_ghz" "$c_frac")
+
+    raw_soc_temp=0
+    [ -n "$cpu_temp_path" ] && [ -f "$cpu_temp_path" ] && read -r raw_soc_temp < "$cpu_temp_path"
+    if [ "$raw_soc_temp" -le 0 ]; then
+        if v_temp=$(vcgencmd measure_temp 2>/dev/null); then
+            v_num=${v_temp#*=}
+            v_num=${v_num%\'*}
+            whole=${v_num%.*}
+            frac=${v_num#*.}
+            raw_soc_temp=$(( whole * 1000 + frac * 100 ))
+        fi
+    fi
+
+    # 3. GPU (VideoCore VII / V3D)
+    gpu_load=0
+    gpu_rt=0
+    gpu_ts=0
+    if [ -f /sys/devices/platform/axi/1002000000.v3d/gpu_stats ]; then
+        while read -r q ts jobs rt; do
+            [ "$q" = "queue" ] && continue
+            [ "$gpu_ts" -eq 0 ] && gpu_ts="$ts"
+            gpu_rt=$((gpu_rt + rt))
+        done < /sys/devices/platform/axi/1002000000.v3d/gpu_stats
+
+        if [ "$prev_gpu_ts" -gt 0 ] && [ "$gpu_ts" -gt "$prev_gpu_ts" ]; then
+            delta_rt=$((gpu_rt - prev_gpu_rt))
+            delta_ts=$((gpu_ts - prev_gpu_ts))
+            if [ "$delta_ts" -gt 0 ] && [ "$delta_rt" -gt 0 ]; then
+                gpu_load=$(( (delta_rt * 100) / delta_ts ))
+                [ "$gpu_load" -gt 100 ] && gpu_load=100
+            fi
+        fi
+        prev_gpu_rt=$gpu_rt
+        prev_gpu_ts=$gpu_ts
+    fi
+
+    freq_gpu=0
+    if raw_v3d=$(vcgencmd measure_clock v3d 2>/dev/null); then
+        raw_hz="${raw_v3d#*=}"
+        freq_gpu=$((raw_hz / 1000000))
+    fi
+
+    # 4. VPU (HEVC / Hardware Video Decoder 1000800000.codec)
+    vpu_load=0
+    vpu_irqs_rate=0
+    freq_vpu=0
+    if [ "$vpu_online" = true ]; then
+        curr_vpu_irqs=$(awk '/codec|rpi-hevc|hevc/{for(i=2;i<=NF;i++){if($i~/^[0-9]+$/){s+=$i}else break};print s+0}' /proc/interrupts 2>/dev/null)
+        [ -z "$curr_vpu_irqs" ] && curr_vpu_irqs=0
+        diff_vpu_irqs=$((curr_vpu_irqs - prev_vpu_irqs))
+        prev_vpu_irqs=$curr_vpu_irqs
+
+        if [ "$REFRESH_INTERVAL" -gt 0 ]; then
+            vpu_irqs_rate=$(( diff_vpu_irqs / REFRESH_INTERVAL ))
+        else
+            vpu_irqs_rate=$diff_vpu_irqs
+        fi
+        [ "$vpu_irqs_rate" -lt 0 ] && vpu_irqs_rate=0
+
+        # Peak 60fps 4K decode maps to 100%
+        if [ "$vpu_irqs_rate" -gt 0 ]; then
+            vpu_load=$(( (vpu_irqs_rate * 100) / 60 ))
+            [ "$vpu_load" -gt 100 ] && vpu_load=100
+            [ "$vpu_load" -eq 0 ] && vpu_load=1
+        fi
+
+        if raw_hevc=$(vcgencmd measure_clock hevc 2>/dev/null); then
+            raw_hz="${raw_hevc#*=}"
+            freq_vpu=$((raw_hz / 1000000))
+        elif raw_core=$(vcgencmd measure_clock core 2>/dev/null); then
+            raw_hz="${raw_core#*=}"
+            freq_vpu=$((raw_hz / 1000000))
+        fi
+    fi
+
+    # 5. FAN Speed & RPM
+    fan_raw=0
+    fan_pct=0
+    fan_rpm=0
+    if [ -n "$fan_pwm_path" ] && [ -f "$fan_pwm_path" ]; then
+        read -r fan_raw < "$fan_pwm_path" 2>/dev/null
+        [ -z "$fan_raw" ] && fan_raw=0
+        fan_pct=$(( (fan_raw * 100 + 127) / 255 ))
+        [ "$fan_pct" -gt 100 ] && fan_pct=100
+    fi
+    if [ -n "$fan_rpm_path" ] && [ -f "$fan_rpm_path" ]; then
+        read -r fan_rpm < "$fan_rpm_path" 2>/dev/null
+        [ -z "$fan_rpm" ] && fan_rpm=0
+    fi
+
+    # 6. Storage (NVMe / Disk)
+    raw_nvme_temp=0
+    [ -n "$nvme_temp_path" ] && [ -f "$nvme_temp_path" ] && read -r raw_nvme_temp < "$nvme_temp_path" 2>/dev/null
+
+    disk_pct=0
+    disk_free_str="--G free"
+    if read -r d_size d_used d_avail d_pct < <(df -BG / 2>/dev/null | awk 'NR==2 {print $2, $3, $4, $5}'); then
+        disk_pct="${d_pct%%%}"
+        disk_free_str="${d_avail} free"
+    fi
+
+    # 7. Memory (RAM & Swap)
+    mem_total_kb=0
+    mem_avail_kb=0
+    swap_total_kb=0
+    swap_free_kb=0
+    while read -r key val _; do
+        case "$key" in
+            MemTotal:) mem_total_kb="$val" ;;
+            MemAvailable:) mem_avail_kb="$val" ;;
+            SwapTotal:) swap_total_kb="$val" ;;
+            SwapFree:) swap_free_kb="$val" ;;
+        esac
+    done < /proc/meminfo
+
+    mem_total_mb=$((mem_total_kb / 1024))
+    mem_avail_mb=$((mem_avail_kb / 1024))
+    mem_used_mb=$((mem_total_mb - mem_avail_mb))
+    mem_pct=0
+    [ "$mem_total_mb" -gt 0 ] && mem_pct=$(( (mem_used_mb * 100) / mem_total_mb ))
+
+    r_ugb=$((mem_used_mb / 1024))
+    r_ufrac=$(( (mem_used_mb % 1024) * 10 / 1024 ))
+    r_tgb=$((mem_total_mb / 1024))
+    r_tfrac=$(( (mem_total_mb % 1024) * 10 / 1024 ))
+    ram_str=$(printf "%d.%d/%d.%dG" "$r_ugb" "$r_ufrac" "$r_tgb" "$r_tfrac")
+
+    swap_total_mb=$((swap_total_kb / 1024))
+    swap_used_mb=$(( (swap_total_kb - swap_free_kb) / 1024 ))
+    swap_pct=0
+    [ "$swap_total_mb" -gt 0 ] && swap_pct=$(( (swap_used_mb * 100) / swap_total_mb ))
+
+    s_ugb=$((swap_used_mb / 1024))
+    s_ufrac=$(( (swap_used_mb % 1024) * 10 / 1024 ))
+    s_tgb=$((swap_total_mb / 1024))
+    s_tfrac=$(( (swap_total_mb % 1024) * 10 / 1024 ))
+    swp_str=$(printf "%d.%d/%d.%dG" "$s_ugb" "$s_ufrac" "$s_tgb" "$s_tfrac")
+
+    # Throttled status check
+    throttled_flag=""
+    if throttled_out=$(vcgencmd get_throttled 2>/dev/null); then
+        if [ "$throttled_out" != "throttled=0x0" ]; then
+            throttled_flag=" ${RED}!THROTTLED!${RESET}"
+        fi
+    fi
+
+    curr_time=$(date "+%H:%M:%S")
+    uptime_fmt=$(get_uptime)
+
+    # Board detection
+    board_model="Raspberry Pi 5"
+    if [ -f /proc/device-tree/model ]; then
+        raw_model=$(tr -d '\0' < /proc/device-tree/model)
+        if [[ "$raw_model" =~ Raspberry[[:space:]]+Pi[[:space:]]+([0-9]+) ]]; then
+            board_model="Raspberry Pi ${BASH_REMATCH[1]}"
+        fi
+    fi
+
+    # ----- Mobile-Optimized Render (Exact Width: 37 Columns) -----
+    [ "$RUN_ONCE" != true ] && printf "\033[H"
+
+    printf " ${BOLD}${WHITE}%s${RESET} ${DIM}(BCM2712)${RESET}\n" "$board_model"
+    if [ -n "$throttled_flag" ]; then
+        printf " ${GRAY}%s · Up: %-5s${RESET}%b\n" "$curr_time" "$uptime_fmt" "$throttled_flag"
+    else
+        printf " ${GRAY}%s · Up: %-5s · Load: %s${RESET}\n" "$curr_time" "$uptime_fmt" "$l1"
+    fi
+    printf "${CYAN}─────────────────────────────────────${RESET}\n"
+
+    # CPU Line: Name(4) %(5) Bar(12) Temp(7) Freq(8) = 36 cols
+    printf " ${BOLD}${MAGENTA}CPU${RESET} %3d%% " "$cpu_usage"
+    draw_bar "$cpu_usage"
+    printf " %b  %-7s\n" "$(format_temp "$raw_soc_temp")" "$freq_cpu_str"
+
+    # GPU Line: Name(4) %(5) Bar(12) Temp(7) Freq(8) = 36 cols
+    printf " ${BOLD}${GREEN}GPU${RESET} %3d%% " "$gpu_load"
+    draw_bar "$gpu_load"
+    printf " %b  %4dMHz\n" "$(format_temp "$raw_soc_temp")" "$freq_gpu"
+
+    # VPU Line: Name(4) %(5) Bar(12) Clock/Throughput(7) Engine(5) = 37 cols
+    if [ "$vpu_online" = true ]; then
+        printf " ${BOLD}${BR_CYAN}VPU${RESET} %3d%% " "$vpu_load"
+        draw_bar "$vpu_load"
+        if [ "$vpu_irqs_rate" -gt 0 ]; then
+            printf " ${DIM}%5s/s${RESET}  ${DIM}hevc${RESET}\n" "$vpu_irqs_rate"
+        elif [ "$freq_vpu" -gt 0 ]; then
+            printf " %4dMHz  ${DIM}hevc${RESET}\n" "$freq_vpu"
+        else
+            printf " ${DIM}%5s/s${RESET}  ${DIM}hevc${RESET}\n" "0"
+        fi
+    else
+        printf " ${BOLD}${BR_CYAN}VPU${RESET} ${DIM}OFF ${RESET} "
+        draw_bar 0
+        printf " ${DIM}OFFLINE${RESET}\n"
+    fi
+
+    # FAN Line: Name(4) %(5) Bar(12) RPM(9) Note(6) = 36 cols
+    printf " ${BOLD}${CYAN}FAN${RESET} %3d%% " "$fan_pct"
+    draw_bar "$fan_pct"
+    if [ "$fan_pct" -eq 0 ] && [ "$fan_rpm" -eq 0 ]; then
+        printf "   0 RPM  ${DIM}OFF${RESET}\n"
+    else
+        printf " %4d RPM  ${CYAN}PWM${RESET}\n" "$fan_rpm"
+    fi
+
+    # Storage Line (NVM/DSK): Name(4) %(5) Bar(12) Temp(7) Free(8) = 36 cols
+    printf " ${BOLD}${YELLOW}%s${RESET} %3d%% " "$disk_label" "$disk_pct"
+    draw_bar "$disk_pct"
+    if [ "$raw_nvme_temp" -gt 0 ]; then
+        printf " %b  %-9s\n" "$(format_temp "$raw_nvme_temp")" "$disk_free_str"
+    else
+        printf "          %-9s\n" "$disk_free_str"
+    fi
+
+    # RAM Line: Name(4) %(5) Bar(12) Used/Tot(9) Free(6) = 36 cols
+    printf " ${BOLD}${BLUE}RAM${RESET} %3d%% " "$mem_pct"
+    draw_bar "$mem_pct"
+    printf " %-8s ${GRAY}%4dM free${RESET}\n" "$ram_str" "$mem_avail_mb"
+
+    # SWP Line (if swap exists)
+    if [ "$swap_total_mb" -gt 0 ]; then
+        printf " ${BOLD}${BLUE}SWP${RESET} %3d%% " "$swap_pct"
+        draw_bar "$swap_pct"
+        printf " %-8s\n" "$swp_str"
+    fi
+
+    printf "${CYAN}─────────────────────────────────────${RESET}\n"
+    printf " ${GRAY}[Ctrl+C] Exit  ·  Refresh: %ds${RESET}\n" "$REFRESH_INTERVAL"
+    [ "$RUN_ONCE" != true ] && printf "\033[J"
+
+    if [ "$RUN_ONCE" = true ]; then
+        break
+    fi
+    sleep "$REFRESH_INTERVAL"
+done
