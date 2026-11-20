@@ -1,3 +1,18 @@
+pinta-3.1.2 (3.1.2+rpi5backport3) bookworm; urgency=medium
+
+  * GTK 4.8 fix: drawing a selection no longer crashes with
+    "System.EntryPointNotFoundException: Unable to find an entry point
+    named 'gsk_path_builder_new' in shared library 'Gsk'".
+    Gsk.PathBuilder, Gsk.Path and Gsk.Stroke (and
+    Gtk.Snapshot.AppendFill / AppendStroke) require GTK 4.14+, so the
+    selection outline, the selection handles (MoveHandle) and the pixel
+    and axonometric canvas grids are now drawn with a Gtk.Snapshot
+    Cairo node (gtk_snapshot_append_cairo) instead.
+  * The manual gsk_path_builder_add_cairo_path binding in
+    Pinta.Core/Extensions/GskExtensions.cs is no longer needed.
+
+ -- Pinta RPi5 Backport <pinta-rpi5@users.noreply.github.com>  Fri, 20 Nov 2026 00:00:00 +0000
+
 pinta-3.1.2 (3.1.2+rpi5backport2) bookworm; urgency=medium
 
   * Fix the missing Adjustments and Effects header icons in the

@@ -11,7 +11,7 @@ so users do not need a separate dotnet installation.
 ## Package
 
 - Name: `pinta-3.1.2`
-- Version: `3.1.2+rpi5backport2`
+- Version: `3.1.2+rpi5backport3`
 - Architecture: `arm64`
 - Installs to: `/usr/lib/pinta-3.1.2`, launcher `/usr/bin/pinta-3.1.2`
 - Desktop entry: `/usr/share/applications/com.github.PintaProject.Pinta.desktop`
@@ -22,14 +22,14 @@ The package coexists with a manual Pinta 2.1.x install under
 
 ## Built package
 
-- File: `pinta-3.1.2_3.1.2+rpi5backport2_arm64.deb`
-- Size: 27 MB (108 MB installed)
-- SHA-256: `0b20d6daf8817e1937077f1408a10aaa20b5bb4998c69512f7aa285451698fe8`
+- File: `pinta-3.1.2_3.1.2+rpi5backport3_arm64.deb`
+- Size: 30 MB (103 MB installed)
+- SHA-256: `a7a523a0aa38355a095d5ce4fa214d523ac2703ba6af585d85236fd60a9739e4`
 
 Install:
 
 ```sh
-sudo apt install ./pinta-3.1.2_3.1.2+rpi5backport2_arm64.deb
+sudo apt install ./pinta-3.1.2_3.1.2+rpi5backport3_arm64.deb
 pinta-3.1.2
 ```
 
@@ -50,7 +50,7 @@ dotnet publish Pinta/Pinta.csproj -c Release -r linux-arm64 \
 ```
 
 The build script creates
-`pinta-3.1.2_3.1.2+rpi5backport2_arm64.deb` and prints its SHA-256.
+`pinta-3.1.2_3.1.2+rpi5backport3_arm64.deb` and prints its SHA-256.
 
 `dotnet publish` can also be run on x86_64 with the .NET 8 SDK; it
 cross-publishes the arm64 runtime pack. The resulting apphost was tested
@@ -59,7 +59,7 @@ on a Raspberry Pi 5 running Debian 12 arm64.
 ## Install
 
 ```sh
-sudo apt install ./pinta-3.1.2_3.1.2+rpi5backport2_arm64.deb
+sudo apt install ./pinta-3.1.2_3.1.2+rpi5backport3_arm64.deb
 pinta-3.1.2
 ```
 
@@ -78,6 +78,8 @@ Source: upstream tag `3.1.2` (commit `b3df1e5`).
 | `Gtk.Snapshot.AppendScaledTexture` | `Gtk.Snapshot.AppendTexture` |
 | `Gdk.MemoryTextureBuilder` | managed Cairo ARGB32 → `GdkPixbuf` + `Gdk.Texture.NewForPixbuf` |
 | `gtk_css_provider_load_from_bytes` | `gtk_css_provider_load_from_data` |
+| `Gsk.PathBuilder` / `Gsk.Path` (GTK 4.14+) | `Gtk.Snapshot.AppendCairo` + Cairo paths |
+| `Gsk.Stroke`, `Gtk.Snapshot.AppendFill` / `AppendStroke` (GTK 4.14+) | Cairo `FillPreserve` / `Stroke` |
 
 Also fixed:
 
@@ -88,10 +90,27 @@ Also fixed:
 - the missing Adjustments/Effects header icons by adding the
   application-local `icons` directory to GTK's icon search path (the
   self-contained layout lives under `/usr/lib/pinta-3.1.2`) and using
-  `currentColor` in the effects SVG so GTK 4.8 can recolor it.
+  `currentColor` in the effects SVG so GTK 4.8 can recolor it;
+- a crash when drawing a selection or a selection handle:
+
+  ```
+  Unhandled exception. System.EntryPointNotFoundException: Unable to find an
+  entry point named 'gsk_path_builder_new' in shared library 'Gsk'.
+  ```
+
+  This happened as soon as the selection outline and its eight
+  `MoveHandle`s were drawn (e.g. after completing a rectangle select).
+  GTK 4.14 introduced `GskPath`/`GskPathBuilder`, which GTK 4.8.3 does
+  not have; the selection outline, the handles and the pixel /
+  axonometric canvas grids are now rendered through a
+  `Gtk.Snapshot` Cairo node (`gtk_snapshot_append_cairo`), which GTK 4.8
+  supports. The manual `gsk_path_builder_add_cairo_path` binding was
+  dropped.
 
 The full diff is in `patches/pinta-3.1.2-gtk48-backport.patch` and is
 also installed in the package under `/usr/share/doc/pinta-3.1.2/`.
+The changed files themselves (without the rest of the source tree) are
+kept in `patched/` — see `patched/README.md`.
 
 ## Known limitations
 

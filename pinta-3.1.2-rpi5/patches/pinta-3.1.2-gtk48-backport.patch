@@ -162,6 +162,39 @@ index 466a674..2d725f8 100644
  
  	[DllImport (PixbufLibraryName, EntryPoint = "gdk_pixbuf_save_to_bufferv")]
  	private static extern bool SaveToBufferv (IntPtr pixbuf, out IntPtr buffer, out uint buffer_size, [MarshalAs (UnmanagedType.LPUTF8Str)] string type, IntPtr option_keys, IntPtr option_values, out GLib.Internal.ErrorOwnedHandle error);
+diff --git a/Pinta.Core/Extensions/GskExtensions.cs b/Pinta.Core/Extensions/GskExtensions.cs
+deleted file mode 100644
+index fdfa638..0000000
+--- a/Pinta.Core/Extensions/GskExtensions.cs
++++ /dev/null
+@@ -1,27 +0,0 @@
+-using System;
+-using System.Runtime.InteropServices;
+-
+-namespace Pinta.Core;
+-
+-public static partial class GskExtensions
+-{
+-	private const string GSK_LIBRARY_NAME = "Gsk";
+-
+-	static GskExtensions ()
+-	{
+-		NativeImportResolver.RegisterLibrary (GSK_LIBRARY_NAME,
+-			windowsLibraryName: "libgtk-4-1.dll",
+-			linuxLibraryName: "libgtk-4.so.1",
+-			osxLibraryName: "libgtk-4.1.dylib"
+-		);
+-	}
+-
+-	// TODO-GTK4 (bindings) - manual binding for AddCairoPath().
+-	[LibraryImport (GSK_LIBRARY_NAME, EntryPoint = "gsk_path_builder_add_cairo_path")]
+-	private static partial void PathBuilderAddCairoPath (Gsk.Internal.PathBuilderHandle handle, Cairo.Internal.PathHandle path);
+-
+-	public static void AddCairoPath (this Gsk.PathBuilder builder, Cairo.Path path)
+-	{
+-		PathBuilderAddCairoPath (builder.Handle, path.Handle);
+-	}
+-}
 diff --git a/Pinta.Core/Extensions/OtherExtensions.cs b/Pinta.Core/Extensions/OtherExtensions.cs
 index 67534be..2be2c71 100644
 --- a/Pinta.Core/Extensions/OtherExtensions.cs
@@ -180,10 +213,47 @@ index 67534be..2be2c71 100644
  	}
  
 diff --git a/Pinta.Gui.Widgets/Widgets/Canvas/PintaCanvas.cs b/Pinta.Gui.Widgets/Widgets/Canvas/PintaCanvas.cs
-index c05ae0c..ce3a8f1 100644
+index c05ae0c..7655473 100644
 --- a/Pinta.Gui.Widgets/Widgets/Canvas/PintaCanvas.cs
 +++ b/Pinta.Gui.Widgets/Widgets/Canvas/PintaCanvas.cs
-@@ -168,19 +168,12 @@ public sealed class PintaCanvas : Gtk.Picture
+@@ -45,7 +45,6 @@ public sealed class PintaCanvas : Gtk.Picture
+ 	private Gdk.Texture? canvas_texture;
+ 	private RectangleI? modified_area;
+ 
+-	private Gsk.Path? selection_path;
+ 	private readonly uint selection_animation_timer_id;
+ 	private float selection_animation_dash_offset;
+ 
+@@ -68,7 +67,7 @@ public sealed class PintaCanvas : Gtk.Picture
+ 
+ 		document.Workspace.ViewSizeChanged += OnViewSizeChanged;
+ 		document.Workspace.CanvasInvalidated += OnCanvasInvalidated;
+-		document.SelectionChanged += (_, _) => QueueSelectionUpdate ();
++		document.SelectionChanged += (_, _) => QueueUpdate ();
+ 
+ 		// Timer for selection outline animation
+ 		selection_animation_timer_id = GLib.Functions.TimeoutAdd (GLib.Constants.PRIORITY_DEFAULT, 80, SelectionAnimationTick);
+@@ -101,19 +100,6 @@ public sealed class PintaCanvas : Gtk.Picture
+ 		QueueUpdate ();
+ 	}
+ 
+-	/// <summary>
+-	/// Queue an update after a change to the document's selection.
+-	/// </summary>
+-	private void QueueSelectionUpdate (bool onlyDisplaySettings = false)
+-	{
+-		// Clear the cached selection path unless only the display
+-		// settings (e.g. the dash offset) have changed.
+-		if (!onlyDisplaySettings)
+-			selection_path = null;
+-
+-		QueueUpdate ();
+-	}
+-
+ 	/// <summary>
+ 	/// Queue an update to the widget's contents on the next UI update, e.g. after changes
+ 	/// to the canvas contents or the selection.
+@@ -168,19 +154,12 @@ public sealed class PintaCanvas : Gtk.Picture
  		Gdk.Texture? updateTexture = null,
  		Cairo.Region? updateRegion = null)
  	{
@@ -209,7 +279,7 @@ index c05ae0c..ce3a8f1 100644
  	}
  
  	private static Gdk.Texture CreateTransparentPatternTexture () =>
-@@ -233,11 +226,9 @@ public sealed class PintaCanvas : Gtk.Picture
+@@ -233,11 +212,9 @@ public sealed class PintaCanvas : Gtk.Picture
  		if (canvas_texture is null)
  			throw new InvalidOperationException ("Canvas was never invalidated!");
  
@@ -224,6 +294,213 @@ index c05ae0c..ce3a8f1 100644
  	}
  
  	private void DrawSelection (Gtk.Snapshot snapshot, Graphene.Rect canvasViewBounds)
+@@ -247,40 +224,40 @@ public sealed class PintaCanvas : Gtk.Picture
+ 
+ 		bool fillSelection = tools.CurrentTool?.IsSelectionTool ?? false;
+ 
+-		// Update the selection path.
+-		if (selection_path is null) {
+-			Gsk.PathBuilder pathBuilder = Gsk.PathBuilder.New ();
+-			pathBuilder.AddCairoPath (document.Selection.SelectionPath);
+-			selection_path = pathBuilder.ToPath ();
+-		}
+-
+-		snapshot.Save ();
+ 		snapshot.PushClip (canvasViewBounds);
+ 
++		// GTK 4.8 compatibility: Gsk.PathBuilder, Gsk.Path, Gsk.Stroke,
++		// Snapshot.AppendFill and Snapshot.AppendStroke require GTK 4.14+.
++		// Draw the selection outline with a Cairo node instead.
++		//
+ 		// Scale the selection path up to the view size.
+ 		// Note the outline width (below) remains at a constant size.
+ 		float scale = (float) document.Workspace.Scale;
+-		snapshot.Scale (scale, scale);
++		using Cairo.Context cr = snapshot.AppendCairo (canvasViewBounds);
++		cr.Scale (scale, scale);
++
++		cr.NewPath ();
++		cr.AppendPath (document.Selection.SelectionPath);
+ 
+ 		if (fillSelection) {
+ 			Gdk.RGBA fillColor = new () { Red = 0.7f, Green = 0.8f, Blue = 0.9f, Alpha = 0.2f };
+-			snapshot.AppendFill (selection_path, Gsk.FillRule.EvenOdd, fillColor);
++			cr.FillRule = Cairo.FillRule.EvenOdd;
++			cr.SetSourceRgba (fillColor.Red, fillColor.Green, fillColor.Blue, fillColor.Alpha);
++			cr.FillPreserve ();
+ 		}
+ 
+ 		// Draw a white line first so it shows up on dark backgrounds
+-		Gsk.Stroke stroke = Gsk.Stroke.New (lineWidth: 1.0f / scale);
+-		Gdk.RGBA white = new () { Red = 1, Green = 1, Blue = 1, Alpha = 1 };
+-		snapshot.AppendStroke (selection_path, stroke, white);
++		cr.SetSourceRgba (1, 1, 1, 1);
++		cr.LineWidth = 1.0 / scale;
++		cr.StrokePreserve ();
+ 
+ 		// Draw a black dashed line over the white line
+-		float dashOffset = selection_animation_dash_offset / scale;
+-		stroke.SetDash ([2.0f / scale, 4.0f / scale]);
+-		stroke.SetDashOffset (dashOffset);
+-		Gdk.RGBA black = new () { Red = 0, Green = 0, Blue = 0, Alpha = 1 };
+-		snapshot.AppendStroke (selection_path, stroke, black);
++		cr.SetSourceRgba (0, 0, 0, 1);
++		cr.LineWidth = 1.0 / scale;
++		cr.SetDash (new double[] { 2.0 / scale, 4.0 / scale }, selection_animation_dash_offset / scale);
++		cr.Stroke ();
+ 
+ 		snapshot.Pop ();
+-		snapshot.Restore ();
+ 	}
+ 
+ 	private void DrawHandles (Gtk.Snapshot snapshot, Graphene.Rect canvasViewBounds)
+@@ -303,47 +280,39 @@ public sealed class PintaCanvas : Gtk.Picture
+ 		if (!ShouldShowCanvasGrid ())
+ 			return;
+ 
+-		Gsk.Path gridPath = BuildCanvasGridPath ();
+-
+ 		snapshot.PushClip (canvasViewBounds);
+-		snapshot.Save ();
+ 
+-		// Scale the selection path up to the view size.
++		// GTK 4.8 compatibility: Gsk.Path and Gsk.Stroke require GTK 4.14+.
++		// Draw the grid with a Cairo node instead.
+ 		float scale = (float) document.Workspace.Scale;
+-		snapshot.Scale (scale, scale);
+-
+-		// Draw as a dotted line (every other pixel) to have a more subtle appearance.
+-		Gsk.Stroke stroke = Gsk.Stroke.New (lineWidth: 1.0f / scale);
+-		stroke.SetDash ([1.0f / scale, 1.0f / scale]);
+-
+-		Gdk.RGBA color = new () { Red = 0, Green = 0, Blue = 0, Alpha = 1 };
+-		snapshot.AppendStroke (gridPath, stroke, color);
+-
+-		snapshot.Restore ();
+-		snapshot.Pop ();
+-	}
++		using Cairo.Context cr = snapshot.AppendCairo (canvasViewBounds);
++		cr.Scale (scale, scale);
+ 
+-	private Gsk.Path BuildCanvasGridPath ()
+-	{
+ 		int cellHeight = canvas_grid.CellHeight;
+ 		int cellWidth = canvas_grid.CellWidth;
+ 		int imageHeight = document.ImageSize.Height;
+ 		int imageWidth = document.ImageSize.Width;
+ 
+-		Gsk.PathBuilder pathBuilder = Gsk.PathBuilder.New ();
++		// Draw as a dotted line (every other pixel) to have a more subtle appearance.
++		cr.SetSourceRgba (0, 0, 0, 1);
++		cr.LineWidth = 1.0 / scale;
++		cr.SetDash (new double[] { 1.0 / scale, 1.0 / scale }, 0);
++
+ 		// Add horizontal lines.
+ 		for (int y = 0; y < imageHeight; y += cellHeight) {
+-			pathBuilder.MoveTo (0, y);
+-			pathBuilder.LineTo (imageWidth, y);
++			cr.MoveTo (0, y);
++			cr.LineTo (imageWidth, y);
+ 		}
+ 
+ 		// Add vertical lines.
+ 		for (int x = 0; x < imageWidth; x += cellWidth) {
+-			pathBuilder.MoveTo (x, 0);
+-			pathBuilder.LineTo (x, imageHeight);
++			cr.MoveTo (x, 0);
++			cr.LineTo (x, imageHeight);
+ 		}
+ 
+-		return pathBuilder.ToPath ();
++		cr.Stroke ();
++
++		snapshot.Pop ();
+ 	}
+ 
+ 	/// <summary>
+@@ -370,56 +339,47 @@ public sealed class PintaCanvas : Gtk.Picture
+ 		if (!ShouldShowCanvasAxonometricGrid ())
+ 			return;
+ 
+-		Gsk.Path gridPath = BuildCanvasAxonometricGridPath ();
+-
+ 		snapshot.PushClip (canvasViewBounds);
+-		snapshot.Save ();
+ 
+-		// Scale the selection path up to the view size.
++		// GTK 4.8 compatibility: Gsk.Path and Gsk.Stroke require GTK 4.14+.
++		// Draw the grid with a Cairo node instead.
+ 		float scale = (float) document.Workspace.Scale;
+-		snapshot.Scale (scale, scale);
+-
+-		// Draw as a dotted line (every other pixel) to have a more subtle appearance.
+-		Gsk.Stroke stroke = Gsk.Stroke.New (lineWidth: 1.0f / scale);
+-		stroke.SetDash ([1.0f / scale, 1.0f / scale]);
++		using Cairo.Context cr = snapshot.AppendCairo (canvasViewBounds);
++		cr.Scale (scale, scale);
+ 
+-		Gdk.RGBA color = new () { Red = 0, Green = 0, Blue = 0, Alpha = 1 };
+-		snapshot.AppendStroke (gridPath, stroke, color);
+-
+-		snapshot.Restore ();
+-		snapshot.Pop ();
+-	}
+-
+-	private Gsk.Path BuildCanvasAxonometricGridPath ()
+-	{
+ 		int axonometricWidth = canvas_grid.AxonometricWidth;
+ 		int imageHeight = document.ImageSize.Height;
+ 		int imageWidth = document.ImageSize.Width;
+ 
+-		Gsk.PathBuilder pathBuilder = Gsk.PathBuilder.New ();
++		// Draw as a dotted line (every other pixel) to have a more subtle appearance.
++		cr.SetSourceRgba (0, 0, 0, 1);
++		cr.LineWidth = 1.0 / scale;
++		cr.SetDash (new double[] { 1.0 / scale, 1.0 / scale }, 0);
+ 
+ 		// Adds ascending diagonal lines.
+ 		// '2 * axonometricWidth' ensures the vertical lines will align correctly.
+ 		for (int i = 0; i < imageWidth + imageHeight; i += 2 * axonometricWidth) {
+-			pathBuilder.MoveTo (0, i);
+-			pathBuilder.LineTo (i, 0);
++			cr.MoveTo (0, i);
++			cr.LineTo (i, 0);
+ 		}
+ 
+ 		// Adds descending diagonal lines.
+ 		// The 'imageHeight % (2 * axonometricWidth)' adjustment is used to ensure our lines will align
+ 		// to the top [0, 0] instead of the bottom [0, imageHeight]
+ 		for (int i = -imageHeight + imageHeight % (2 * axonometricWidth); i < imageWidth; i += 2 * axonometricWidth) {
+-			pathBuilder.MoveTo (i, 0);
+-			pathBuilder.LineTo (i + imageHeight, imageHeight);
++			cr.MoveTo (i, 0);
++			cr.LineTo (i + imageHeight, imageHeight);
+ 		}
+ 
+ 		// Add vertical lines.
+ 		for (int i = 0; i < imageWidth; i += axonometricWidth) {
+-			pathBuilder.MoveTo (i, 0);
+-			pathBuilder.LineTo (i, imageHeight);
++			cr.MoveTo (i, 0);
++			cr.LineTo (i, imageHeight);
+ 		}
+ 
+-		return pathBuilder.ToPath ();
++		cr.Stroke ();
++
++		snapshot.Pop ();
+ 	}
+ 
+ 	/// <summary>
+@@ -458,7 +418,7 @@ public sealed class PintaCanvas : Gtk.Picture
+ 		if (selection_animation_dash_offset < 0f)
+ 			selection_animation_dash_offset += 6f;
+ 
+-		QueueSelectionUpdate (onlyDisplaySettings: true);
++		QueueUpdate ();
+ 		return true;
+ 	}
+ 	#endregion
 diff --git a/Pinta.Resources/ResourceManager.cs b/Pinta.Resources/ResourceManager.cs
 index 99c0f5c..17b81b7 100644
 --- a/Pinta.Resources/ResourceManager.cs
@@ -251,6 +528,51 @@ index 2e4ffda..cf8309b 100644
            fill-opacity='1'
            fill-rule='nonzero'
            stroke-width='0.0250567'
+diff --git a/Pinta.Tools/Handles/MoveHandle.cs b/Pinta.Tools/Handles/MoveHandle.cs
+index 385f674..1e6442c 100644
+--- a/Pinta.Tools/Handles/MoveHandle.cs
++++ b/Pinta.Tools/Handles/MoveHandle.cs
+@@ -1,3 +1,4 @@
++using System;
+ using System.Collections.Generic;
+ using System.Linq;
+ using Pinta.Core;
+@@ -54,16 +55,29 @@ public sealed class MoveHandle : IToolHandle
+ 	/// </summary>
+ 	public void Draw (Gtk.Snapshot snapshot)
+ 	{
+-		Gsk.PathBuilder pathBuilder = Gsk.PathBuilder.New ();
+ 		PointD windowPt = workspace.CanvasPointToView (CanvasPosition);
+-		pathBuilder.AddCircle (windowPt.ToGraphenePoint (), (float) RADIUS);
+-		Gsk.Path path = pathBuilder.ToPath ();
++
++		// GTK 4.8 compatibility: Gsk.PathBuilder, Gsk.Path, Gsk.Stroke,
++		// Snapshot.AppendFill and Snapshot.AppendStroke require GTK 4.14+.
++		// Draw the handle with a Cairo node instead.
++		const float PADDING = 1.5f;
++		Graphene.Rect bounds = Graphene.Rect.Alloc ();
++		bounds.Init (
++			(float) (windowPt.X - RADIUS - PADDING),
++			(float) (windowPt.Y - RADIUS - PADDING),
++			(float) (2 * RADIUS + 2 * PADDING),
++			(float) (2 * RADIUS + 2 * PADDING));
++
++		using Cairo.Context cr = snapshot.AppendCairo (bounds);
++		cr.Arc (windowPt.X, windowPt.Y, RADIUS, 0, 2 * Math.PI);
+ 
+ 		Gdk.RGBA fillColor = Selected ? selection_fill_color : fill_color;
+-		snapshot.AppendFill (path, Gsk.FillRule.EvenOdd, fillColor);
++		cr.SetSourceRgba (fillColor.Red, fillColor.Green, fillColor.Blue, fillColor.Alpha);
++		cr.FillPreserve ();
+ 
+-		Gsk.Stroke stroke = Gsk.Stroke.New (lineWidth: 1.0f);
+-		snapshot.AppendStroke (path, stroke, stroke_color);
++		cr.SetSourceRgba (stroke_color.Red, stroke_color.Green, stroke_color.Blue, stroke_color.Alpha);
++		cr.LineWidth = 1.0;
++		cr.Stroke ();
+ 	}
+ 
+ 	/// <summary>
 diff --git a/Pinta.Tools/Tools/TextTool.cs b/Pinta.Tools/Tools/TextTool.cs
 index 24bde88..d0c04d0 100644
 --- a/Pinta.Tools/Tools/TextTool.cs

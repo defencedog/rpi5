@@ -1,5 +1,5 @@
 Package: pinta-3.1.2
-Version: 3.1.2+rpi5backport2
+Version: 3.1.2+rpi5backport3
 Section: graphics
 Priority: optional
 Architecture: arm64

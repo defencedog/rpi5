@@ -3,7 +3,7 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PUBLISH_DIR=${1:-/tmp/pinta-publish-arm64}
-OUT=${2:-"$SCRIPT_DIR/pinta-3.1.2_3.1.2+rpi5backport2_arm64.deb"}
+OUT=${2:-"$SCRIPT_DIR/pinta-3.1.2_3.1.2+rpi5backport3_arm64.deb"}
 
 if [ ! -x "$PUBLISH_DIR/Pinta" ]; then
     echo "error: $PUBLISH_DIR/Pinta not found or not executable" >&2
